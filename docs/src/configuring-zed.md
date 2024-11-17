@@ -825,6 +825,8 @@ While other options may be changed at a runtime and should be placed under `sett
 
 3. External formatters may optionally include a `{buffer_path}` placeholder which at runtime will include the path of the buffer being formatted. Formatters operate by receiving file content via standard input, reformatting it and then outputting it to standard output and so normally don't know the filename of what they are formatting. Tools like prettier support receiving the file path via a command line argument which can then used to impact formatting decisions.
 
+WARNING: `{buffer_path}` should not be used to direct your formatter to read from a filename. Your formatter should only read from standard input and should not read or write files directly.
+
 ```json
   "formatter": {
     "external": {
@@ -1413,6 +1415,14 @@ Or to set a `socks5` proxy:
 **Options**
 
 `boolean` values
+
+## File Finder
+
+### Modal Width
+
+- Description: Width of the file finder modal. Can take one of a few values: `small`, `medium`, `large`, `xlarge`, and `full`.
+- Setting: `modal_width`
+- Default: `medium`
 
 ## Preferred Line Length
 
