@@ -2120,9 +2120,15 @@ fn matching(map: &DisplaySnapshot, display_point: DisplayPoint) -> DisplayPoint 
             if map.buffer_snapshot.chars_at(open_range.start).next() == Some('<') {
                 if offset > open_range.start && offset < close_range.start {
                     let mut chars = map.buffer_snapshot.chars_at(close_range.start);
+
+                    if let Some(enclosing_match) = match_to_enclosing(map, display_point) {
+                        return enclosing_match;
+                    }
+
                     if (Some('/'), Some('>')) == (chars.next(), chars.next()) {
                         return display_point;
                     }
+
                     if let Some(tag) = matching_tag(map, display_point) {
                         return tag;
                     }
@@ -2164,6 +2170,42 @@ fn matching(map: &DisplaySnapshot, display_point: DisplayPoint) -> DisplayPoint 
     } else {
         display_point
     }
+}
+
+fn match_to_enclosing(map: &DisplaySnapshot, display_point: DisplayPoint) -> Option<DisplayPoint> {
+    let display_point = map.clip_at_line_end(display_point);
+    let point = display_point.to_point(map);
+    let offset = point.to_offset(&map.buffer_snapshot);
+    let enclosing = map.buffer_snapshot.enclosing_bracket_ranges(point..point);
+
+    if let Some(enclosing) = enclosing {
+        for (start_range, end_range) in enclosing {
+            // ignore tag brackets
+            let start = map.buffer_snapshot.chars_at(start_range.start).next();
+            let end = map
+                .buffer_snapshot
+                .chars_at(end_range.end.saturating_sub(1))
+                .next();
+            if start == Some('<') || end == Some('>') {
+                continue;
+            }
+
+            if start_range.contains(&offset) {
+                return Some(end_range.start.to_display_point(map));
+            }
+
+            if end_range.contains(&offset) {
+                return Some(start_range.start.to_display_point(map));
+            }
+
+            if offset - start_range.end < end_range.start - offset {
+                return Some(start_range.start.to_display_point(map));
+            } else {
+                return Some(end_range.start.to_display_point(map));
+            }
+        }
+    }
+    None
 }
 
 // Go to {count} percentage in the file, on the first
@@ -2954,6 +2996,7 @@ mod test {
 
     #[gpui::test]
     async fn test_matching_tags(cx: &mut gpui::TestAppContext) {
+        let mut zed_cx = VimTestContext::new_html(cx).await;
         let mut cx = NeovimBackedTestContext::new_html(cx).await;
 
         cx.neovim.exec("set filetype=html").await;
@@ -3000,6 +3043,20 @@ mod test {
                 test = "test"
             />
         </a>"#});
+
+        // test within brackets within a tag
+        zed_cx.set_state(
+            indoc! {r#"<div id="button ˇbutton-primary">
+            </div>"#},
+            Mode::Normal,
+        );
+        zed_cx.simulate_keystroke("%");
+        // should go to the closest enclosing bracket which is not a tag
+        zed_cx.assert_state(
+            indoc! {r#"<div id=ˇ"button button-primary">
+            </div>"#},
+            Mode::Normal,
+        );
     }
 
     #[gpui::test]
