@@ -28,19 +28,20 @@ use indexmap::IndexMap;
 use language::DiagnosticSeverity;
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use project::{
-    Entry, EntryKind, Fs, GitEntry, GitEntryRef, GitTraversal, Project, ProjectEntryId,
-    ProjectPath, Worktree, WorktreeId,
+    Entry, EntryKind, FileNumber, Fs, GitEntry, GitEntryRef, GitTraversal, Project, ProjectEntryId,
+    ProjectPath, RelativeFileNumber, Worktree, WorktreeId,
     git_store::{GitStoreEvent, git_traversal::ChildEntriesGitIter},
     relativize_path,
 };
 use project_panel_settings::{
-    ProjectPanelDockPosition, ProjectPanelSettings, ShowDiagnostics, ShowIndentGuides,
+    ProjectPanelDockPosition, ProjectPanelSettings, ShowDiagnostics, ShowFileNumbers,
+    ShowIndentGuides,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore, update_settings_file};
 use smallvec::SmallVec;
-use std::any::TypeId;
+use std::{any::TypeId, cell::RefCell, collections::BTreeMap, rc::Rc};
 use std::{
     cell::OnceCell,
     cmp,
@@ -105,10 +106,24 @@ pub struct ProjectPanel {
     hide_scrollbar_task: Option<Task<()>>,
     diagnostics: HashMap<(WorktreeId, PathBuf), DiagnosticSeverity>,
     max_width_item_index: Option<usize>,
+    project_panel_actions: Vec<Box<dyn Fn(Div, &mut Window, &mut Context<Self>) -> Div>>,
     // We keep track of the mouse down state on entries so we don't flash the UI
     // in case a user clicks to open a file.
     mouse_down: bool,
     hover_expand_task: Option<Task<()>>,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Debug, Default)]
+struct ProjectPanelActionId(usize);
+
+impl ProjectPanelActionId {
+    pub fn post_inc(&mut self) -> Self {
+        let answer = self.0;
+
+        *self = Self(answer + 1);
+
+        Self(answer)
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -390,6 +405,9 @@ impl ProjectPanel {
                         cx.notify();
                     }
                 }
+                project::Event::OpenNumberedFile(file_number) => {
+                    this.go_to_numbered_file(file_number.clone(), cx);
+                }
                 _ => {}
             })
             .detach();
@@ -481,6 +499,7 @@ impl ProjectPanel {
                 scroll_handle,
                 mouse_down: false,
                 hover_expand_task: None,
+                project_panel_actions: Default::default(),
             };
             this.update_visible_entries(None, cx);
 
@@ -597,6 +616,33 @@ impl ProjectPanel {
             }
             panel
         })
+    }
+
+    pub fn register_action<A: Action>(
+        &mut self,
+        callback: impl Fn(&mut Self, &A, &mut Window, &mut Context<Self>) + 'static,
+    ) -> &mut Self {
+        let callback = Arc::new(callback);
+
+        self.project_panel_actions.push(Box::new(move |div, _, cx| {
+            let callback = callback.clone();
+            div.on_action(cx.listener(move |project_panel, event, window, cx| {
+                (callback.clone())(project_panel, event, window, cx)
+            }))
+        }));
+        self
+    }
+
+    fn add_project_panel_actions_listeners(
+        &self,
+        mut div: Div,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        for action in self.project_panel_actions.iter() {
+            div = (action)(div, window, cx)
+        }
+        div
     }
 
     fn update_diagnostics(&mut self, cx: &mut Context<Self>) {
@@ -938,7 +984,7 @@ impl ProjectPanel {
         cx.notify();
     }
 
-    fn toggle_expanded(
+    fn toggle_expanded_with_focus(
         &mut self,
         entry_id: ProjectEntryId,
         window: &mut Window,
@@ -959,6 +1005,26 @@ impl ProjectPanel {
                 });
                 self.update_visible_entries(Some((worktree_id, entry_id)), cx);
                 window.focus(&self.focus_handle);
+                cx.notify();
+            }
+        }
+    }
+
+    fn toggle_expanded(&mut self, entry_id: ProjectEntryId, cx: &mut Context<Self>) {
+        if let Some(worktree_id) = self.project.read(cx).worktree_id_for_entry(entry_id, cx) {
+            if let Some(expanded_dir_ids) = self.expanded_dir_ids.get_mut(&worktree_id) {
+                self.project.update(cx, |project, cx| {
+                    match expanded_dir_ids.binary_search(&entry_id) {
+                        Ok(ix) => {
+                            expanded_dir_ids.remove(ix);
+                        }
+                        Err(ix) => {
+                            project.expand_entry(worktree_id, entry_id, cx);
+                            expanded_dir_ids.insert(ix, entry_id);
+                        }
+                    }
+                });
+                self.update_visible_entries(Some((worktree_id, entry_id)), cx);
                 cx.notify();
             }
         }
@@ -1128,7 +1194,7 @@ impl ProjectPanel {
                 self.open_entry(entry.id, focus_opened_item, allow_preview, cx);
                 cx.notify();
             } else {
-                self.toggle_expanded(entry.id, window, cx);
+                self.toggle_expanded_with_focus(entry.id, window, cx);
             }
         }
     }
@@ -3576,6 +3642,7 @@ impl ProjectPanel {
         let kind = details.kind;
         let settings = ProjectPanelSettings::get_global(cx);
         let show_editor = details.is_editing && !details.is_processing;
+        let relative_line_numbers = EditorSettings::get_global(cx).relative_line_numbers;
 
         let selection = SelectedEntry {
             worktree_id: details.worktree_id,
@@ -3630,7 +3697,9 @@ impl ProjectPanel {
         };
 
         let border_color =
-            if !self.mouse_down && is_active && self.focus_handle.contains_focused(window, cx) {
+            if (!self.mouse_down && is_active && self.focus_handle.contains_focused(window, cx))
+                || is_marked
+            {
                 item_colors.focused
             } else {
                 bg_color
@@ -3645,6 +3714,19 @@ impl ProjectPanel {
 
         let folded_directory_drag_target = self.folded_directory_drag_target;
 
+        let file_number = self.get_file_number(
+            worktree_id,
+            entry_id,
+            settings.show_file_numbers,
+            relative_line_numbers,
+        );
+
+        let file_number_color = if is_marked {
+            Color::Default
+        } else {
+            Color::Muted
+        };
+
         div()
             .id(entry_id.to_proto() as usize)
             .group(GROUP_NAME)
@@ -3655,6 +3737,8 @@ impl ProjectPanel {
             .border_r_2()
             .border_color(border_color)
             .hover(|style| style.bg(bg_hover_color).border_color(border_hover_color))
+            .h_flex()
+            .w_full()
             .when(is_local, |div| {
                 div.on_drag_move::<ExternalPaths>(cx.listener(
                     move |this, event: &DragMoveEvent<ExternalPaths>, _, cx| {
@@ -3846,7 +3930,7 @@ impl ProjectPanel {
                         if event.modifiers().alt {
                             this.toggle_expand_all(entry_id, window, cx);
                         } else {
-                            this.toggle_expanded(entry_id, window, cx);
+                            this.toggle_expanded_with_focus(entry_id, window, cx);
                         }
                     } else {
                         let preview_tabs_enabled = PreviewTabsSettings::get_global(cx).enabled;
@@ -3857,6 +3941,16 @@ impl ProjectPanel {
                     }
                 }),
             )
+            .when_some(file_number, |this, file_number| {
+                this.child(
+                    div()
+                        .px(px(8.))
+                        .flex()
+                        .justify_start()
+                        .w(px(40.))
+                        .child(Label::new(format!("{}", file_number)).color(file_number_color)),
+                )
+            })
             .child(
                 ListItem::new(entry_id.to_proto() as usize)
                     .indent_level(depth)
@@ -4108,6 +4202,99 @@ impl ProjectPanel {
                     ))
                     .overflow_x(),
             )
+    }
+
+    fn get_file_number(
+        &self,
+        worktree_id: WorktreeId,
+        entry_id: ProjectEntryId,
+        show_file_numbers: ShowFileNumbers,
+        relative_line_numbers: bool,
+    ) -> Option<usize> {
+        let entry_line_number = self
+            .index_for_entry(entry_id, worktree_id)
+            .unwrap_or_default()
+            .2;
+
+        match (show_file_numbers, relative_line_numbers) {
+            (ShowFileNumbers::On, true) => {
+                let selection_line_number = if let Some(selection) = self.selection {
+                    self.index_for_selection(selection).unwrap_or_default().2
+                } else {
+                    0
+                };
+                let line_number = selection_line_number.max(entry_line_number)
+                    - selection_line_number.min(entry_line_number);
+
+                if line_number == 0 {
+                    return Some(entry_line_number);
+                } else {
+                    return Some(line_number);
+                }
+            }
+            (ShowFileNumbers::On, false) => Some(entry_line_number),
+            (ShowFileNumbers::Off, _) => None,
+        }
+    }
+
+    pub fn go_to_numbered_file(&mut self, file_number: FileNumber, cx: &mut Context<Self>) {
+        let variant = ProjectPanelSettings::get_global(cx).show_file_numbers;
+        let relative_line_numbers = EditorSettings::get_global(cx).relative_line_numbers;
+
+        let total_entries: usize = self
+            .visible_entries
+            .iter()
+            .map(|(_, entries, _)| entries.len())
+            .sum();
+
+        let file_index = match (variant, relative_line_numbers) {
+            (ShowFileNumbers::On, false) => match file_number {
+                FileNumber::Absolute(number) => number,
+                FileNumber::Relative(_) => return,
+            },
+            (ShowFileNumbers::On, true) => match file_number {
+                FileNumber::Relative(relative_file_number) => {
+                    let selection_line_number = if let Some(selection) = self.selection {
+                        self.index_for_selection(selection).unwrap_or_default().2
+                    } else {
+                        0
+                    };
+                    match relative_file_number {
+                        RelativeFileNumber::Down(count) => {
+                            let number = selection_line_number.saturating_add(count);
+                            if number > total_entries {
+                                total_entries
+                            } else {
+                                number
+                            }
+                        }
+                        RelativeFileNumber::Up(count) => {
+                            selection_line_number.saturating_sub(count)
+                        }
+                    }
+                }
+                FileNumber::Absolute(count) => return,
+            },
+            (ShowFileNumbers::Off, _) => return,
+        };
+
+        let (worktree_id, entry) = self.entry_at_index(file_index).unwrap();
+
+        let selected_entry = SelectedEntry {
+            worktree_id,
+            entry_id: entry.id,
+        };
+
+        if entry.kind.is_file() {
+            // Open the file
+            self.open_entry(entry.id, true, false, cx);
+        } else if entry.kind.is_dir() {
+            self.toggle_expanded(entry.id, cx);
+        }
+        self.autoscroll(cx);
+
+        self.selection = Some(selected_entry);
+        cx.notify();
     }
 
     fn render_vertical_scrollbar(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
@@ -4391,6 +4578,7 @@ fn item_width_estimate(depth: usize, item_text_chars: usize, is_symlink: bool) -
 impl Render for ProjectPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_worktree = !self.visible_entries.is_empty();
+        let root_element = self.add_project_panel_actions_listeners(h_flex(), window, cx);
         let project = self.project.read(cx);
         let indent_size = ProjectPanelSettings::get_global(cx).indent_size;
         let show_indent_guides =
@@ -4461,7 +4649,8 @@ impl Render for ProjectPanel {
                     }
                 }));
             }
-            h_flex()
+
+            root_element
                 .id("project-panel")
                 .group("project-panel")
                 .on_drag_move(cx.listener(handle_drag_move_scroll::<ExternalPaths>))
@@ -4625,6 +4814,16 @@ impl Render for ProjectPanel {
                                     const LEFT_OFFSET: Pixels = px(14.);
                                     const PADDING_Y: Pixels = px(4.);
                                     const HITBOX_OVERDRAW: Pixels = px(3.);
+                                    let line_number_width = match ProjectPanelSettings::get_global(
+                                        cx,
+                                    )
+                                    .show_file_numbers
+                                    {
+                                        ShowFileNumbers::Off => 0.,
+                                        _ => 34.,
+                                    };
+
+                                    let left_offset = Pixels(14. + line_number_width);
 
                                     let active_indent_guide_index =
                                         this.find_active_indent_guide(&params.indent_guides, cx);
@@ -4644,7 +4843,7 @@ impl Render for ProjectPanel {
                                             };
                                             let bounds = Bounds::new(
                                                 point(
-                                                    layout.offset.x * indent_size + LEFT_OFFSET,
+                                                    layout.offset.x * indent_size + left_offset,
                                                     layout.offset.y * item_height + offset,
                                                 ),
                                                 size(
@@ -4693,7 +4892,7 @@ impl Render for ProjectPanel {
                     .with_priority(1)
                 }))
         } else {
-            v_flex()
+            self.add_project_panel_actions_listeners(v_flex(), window, cx)
                 .id("empty-project_panel")
                 .size_full()
                 .p_4()

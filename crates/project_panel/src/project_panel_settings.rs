@@ -28,6 +28,19 @@ pub enum EntrySpacing {
     Standard,
 }
 
+/// Whether to show file numbers in project panel items.
+///
+/// Default: Off
+#[derive(Copy, Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ShowFileNumbers {
+    /// Never number files the project panel.
+    #[default]
+    Off,
+    /// Number files relative to the currently opened file.
+    On,
+}
+
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct ProjectPanelSettings {
     pub button: bool,
@@ -44,6 +57,7 @@ pub struct ProjectPanelSettings {
     pub auto_fold_dirs: bool,
     pub scrollbar: ScrollbarSettings,
     pub show_diagnostics: ShowDiagnostics,
+    pub show_file_numbers: ShowFileNumbers,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -145,6 +159,10 @@ pub struct ProjectPanelSettingsContent {
     pub show_diagnostics: Option<ShowDiagnostics>,
     /// Settings related to indent guides in the project panel.
     pub indent_guides: Option<IndentGuidesSettingsContent>,
+    /// Number files in the project panel for navigating with shortcuts.
+    ///
+    /// Default: off
+    pub show_file_numbers: Option<ShowFileNumbers>,
 }
 
 impl Settings for ProjectPanelSettings {

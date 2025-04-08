@@ -737,7 +737,10 @@
       "ctrl-w ctrl-o": "workspace::CloseInactiveTabsAndPanes",
       "ctrl-w o": "workspace::CloseInactiveTabsAndPanes",
       "ctrl-w ctrl-n": "workspace::NewFileSplitHorizontal",
-      "ctrl-w n": "workspace::NewFileSplitHorizontal"
+      "ctrl-w n": "workspace::NewFileSplitHorizontal",
+      "k G": ["vim::GoToFileByNumber", "Up"],
+      "j G": ["vim::GoToFileByNumber", "Down"],
+      "G": ["vim::GoToFileByNumber", "Absolute"]
     }
   },
   {

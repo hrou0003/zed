@@ -35,6 +35,7 @@ pub use mode_indicator::ModeIndicator;
 use motion::Motion;
 use normal::search::SearchSubmit;
 use object::Object;
+use project::{FileNumber, RelativeFileNumber};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_derive::Serialize;
@@ -115,6 +116,16 @@ struct PushLiteral {
     prefix: Option<String>,
 }
 
+#[derive(Clone, Copy, Deserialize, JsonSchema, PartialEq)]
+pub struct GoToFileByNumber(pub NumberedFileNavigation);
+
+#[derive(Clone, Copy, Deserialize, JsonSchema, PartialEq)]
+pub enum NumberedFileNavigation {
+    Up,
+    Down,
+    Absolute,
+}
+
 actions!(
     vim,
     [
@@ -181,7 +192,8 @@ impl_actions!(
         PushChangeSurrounds,
         PushJump,
         PushDigraph,
-        PushLiteral
+        PushLiteral,
+        GoToFileByNumber,
     ]
 );
 
@@ -285,6 +297,23 @@ pub fn init(cx: &mut App) {
             let Some(vim) = vim else { return };
             vim.entity.update(cx, |_, cx| {
                 cx.defer_in(window, |vim, window, cx| vim.search_submit(window, cx))
+            })
+        });
+
+        workspace.register_action(|workspace, action: &GoToFileByNumber, window, cx| {
+            let count = Vim::take_count(cx).unwrap_or(1) as usize;
+
+            let file_number = match action.0 {
+                NumberedFileNavigation::Up => FileNumber::Relative(RelativeFileNumber::Up(count)),
+                NumberedFileNavigation::Down => {
+                    FileNumber::Relative(RelativeFileNumber::Down(count))
+                }
+                NumberedFileNavigation::Absolute => FileNumber::Absolute(count),
+            };
+
+            let project = workspace.project().clone();
+            project.update(cx, |_, cx| {
+                cx.emit(project::Event::OpenNumberedFile(file_number))
             })
         });
     })

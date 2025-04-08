@@ -4482,7 +4482,7 @@ fn toggle_expand_dir(
             let worktree = worktree.read(cx);
             if let Ok(relative_path) = path.strip_prefix(worktree.root_name()) {
                 let entry_id = worktree.entry_for_path(relative_path).unwrap().id;
-                panel.toggle_expanded(entry_id, window, cx);
+                panel.toggle_expanded_with_focus(entry_id, window, cx);
                 return;
             }
         }

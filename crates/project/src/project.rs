@@ -251,6 +251,18 @@ enum ProjectClientState {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq)]
+pub enum FileNumber {
+    Absolute(usize),
+    Relative(RelativeFileNumber),
+}
+
+#[derive(Debug, Clone, PartialEq, PartialOrd, Eq)]
+pub enum RelativeFileNumber {
+    Up(usize),
+    Down(usize),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     LanguageServerAdded(LanguageServerId, LanguageServerName, Option<WorktreeId>),
@@ -300,6 +312,7 @@ pub enum Event {
     RevealInProjectPanel(ProjectEntryId),
     SnippetEdit(BufferId, Vec<(lsp::Range, Snippet)>),
     ExpandedAllForEntry(WorktreeId, ProjectEntryId),
+    OpenNumberedFile(FileNumber),
 }
 
 pub enum DebugAdapterClientState {
