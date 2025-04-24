@@ -3942,12 +3942,16 @@ impl ProjectPanel {
                 }),
             )
             .when_some(file_number, |this, file_number| {
+                let em = TextSize::Default.rems(cx).0;
+
+                let width = (self.visible_entries.len() / 10) as f32 * em;
+
                 this.child(
                     div()
                         .px(px(8.))
-                        .flex()
                         .justify_start()
-                        .w(px(40.))
+                        .flex()
+                        .w(px(width))
                         .child(Label::new(format!("{}", file_number)).color(file_number_color)),
                 )
             })
@@ -4278,23 +4282,23 @@ impl ProjectPanel {
             (ShowFileNumbers::Off, _) => return,
         };
 
-        let (worktree_id, entry) = self.entry_at_index(file_index).unwrap();
+        if let Some((worktree_id, entry)) = self.entry_at_index(file_index) {
+            let selected_entry = SelectedEntry {
+                worktree_id,
+                entry_id: entry.id,
+            };
 
-        let selected_entry = SelectedEntry {
-            worktree_id,
-            entry_id: entry.id,
-        };
+            if entry.kind.is_file() {
+                self.open_entry(entry.id, true, false, cx);
+            } else if entry.kind.is_dir() {
+                self.toggle_expanded(entry.id, cx);
+            }
+            self.autoscroll(cx);
 
-        if entry.kind.is_file() {
-            // Open the file
-            self.open_entry(entry.id, true, false, cx);
-        } else if entry.kind.is_dir() {
-            self.toggle_expanded(entry.id, cx);
+            self.selection = Some(selected_entry);
+            self.marked_entries.insert(selected_entry);
+            cx.notify();
         }
-        self.autoscroll(cx);
-
-        self.selection = Some(selected_entry);
-        cx.notify();
     }
 
     fn render_vertical_scrollbar(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
